@@ -1,6 +1,12 @@
 .Rproj.user
 .Rhistory
-.Rdata
-.httr-oauth
+.RData
+.Ruserdata
+.Rapp.history
 .DS_Store
-.quarto
+analysis/figure
+analysis/*png
+analysis/*html
+analysis/*_cache
+analysis/site_libs
+proj_setup/
