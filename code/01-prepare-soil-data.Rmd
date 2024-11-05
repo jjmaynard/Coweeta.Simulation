@@ -1,0 +1,211 @@
+---
+title: "Coweeta Watershed Soil Data Analysis"
+author: "D.E. Beaudette"
+output: html_notebook
+---
+# Note: code reformatted by Jonathan Maynard
+
+```{r setup, include=FALSE}
+# Load required libraries
+library(terra)
+library(soilDB)
+library(rasterVis)
+library(viridisLite)
+library(sf)
+library(aqp)
+library(here)
+```
+
+## Input Data:
+- Coweeta watershed outlines (UTM z17)
+- FY23 RSS grid (NC, EPSG:5070)
+- FY23 SSURGO polygons (SDA, WGS84)
+
+## Output Data (UTM z17):
+- RSS 10m grid
+- SSURGO 10m grid
+- SSURGO original polygons
+- RSS + SSURGO tabular data as SPC
+
+## Notes:
+- "Coweeta_Final_raster.tif" is a non-standard packaging of the RSS
+- Grid cells are non-standard keys -> RAT -> [musym] -> mapunit -> [mukey]
+    - Use FY23 RSS instead: 10m grid via WCS
+    - Tabular RSS data via local download 
+- DEM and derivatives will work on a larger area for complete basin characterization
+
+### Coweeta Laboratory Watersheds (outline)
+```{r}
+# Load Coweeta watershed outline (UTM z17 NAD83)
+o <- vect(here('data/vect/Coweeta_Hydrologic_Laboratory.shp'))
+
+# Extend by 200m to ensure a tight crop
+b <- buffer(o, width = 200)
+```
+
+### Get Latest RSS via WCS
+```{r}
+# Fetch RSS via WCS, map unit keys as cell values
+rss <- mukey.wcs(b, db = 'rss', res = 10)
+
+# Project to UTM z17
+rss <- terra::project(rss, crs(o), method = 'near')
+
+# Crop to watershed boundaries + 200m
+rss <- crop(rss, b)
+
+# Plot to check
+plot(rss)
+lines(o)
+
+# Save for later, includes .xml file with RAT
+writeRaster(rss, filename = here('data/grids/rss_utm.tif'), overwrite = TRUE)
+```
+
+### Get Latest SSURGO via SDA
+```{r}
+# Get SSURGO polygons for the extended watershed area
+s <- SDA_spatialQuery(b, what = 'mupolygon', geomIntersection = TRUE)
+
+# Handle SDA errors
+if(inherits(s, 'try-error')) {
+  stop('SDA returned an error', call. = FALSE)
+}
+
+# Transform to UTM z17
+s <- terra::project(s, crs(o))
+
+# Save polygons
+writeVector(s, filename = here('data/vect/SSURGO-MU.shp'), overwrite = TRUE)
+
+# Check polygons with RSS
+plot(rss)
+lines(s)
+```
+
+### Rasterize SSURGO Using RSS Grid
+```{r}
+# Rasterize SSURGO data using RSS grid system
+s.rast <- raster::rasterize(s, rss, field = 'mukey')
+
+# Crop and mask to RSS data
+s.rast <- mask(crop(s.rast, rss), rss)
+
+# Initialize RAT
+s.rast <- as.factor(s.rast)
+
+# Fix names in RAT
+set.names(s.rast, 'mukey')
+rat <- cats(s.rast)[[1]]
+levels(s.rast) <- rat
+
+# Plot to check
+plot(s.rast, axes = FALSE)
+lines(s)
+
+# Save raster with RAT
+writeRaster(s.rast, filename = here('data/grids/ssurgo_utm.tif'), overwrite = TRUE)
+
+aoi_polygon <- st_as_sfc(st_bbox(c(xmin = -83.45, xmax = -83.35, ymin = 35.00, ymax = 35.10), crs = st_crs(s)))
+aoi_bbox <- ext(-83.45, -83.35, 35.00, 35.10)
+# Define your bounding box coordinates in WGS84 (lat/lon) as a vector
+latlon_bbox <- st_bbox(c(xmin = -83.46, xmax = -83.43, ymin = 35.05, ymax = 35.10), crs = st_crs(4326))
+
+# Convert the bbox to an sf polygon for transformation
+latlon_polygon <- st_as_sfc(latlon_bbox)
+
+# Transform the bounding box to NAD83 / UTM zone 17N (EPSG:26917)
+utm_bbox_polygon <- st_transform(latlon_polygon, crs = 26917)
+
+# Extract the transformed bbox in UTM
+utm_bbox <- st_bbox(utm_bbox_polygon)
+cropped_line_vector <- crop(s, utm_bbox)
+cropped_rast <- crop(s.rast, utm_bbox)
+plot(cropped_rast , axes = FALSE)
+lines(cropped_line_vector)
+
+```
+
+### Load FY23 RSS Tabular Data
+```{r}
+# Load local RSS data
+.rss_path <- here('data/RSS/RSS_NC.gdb')
+st_layers(.rss_path)
+
+# Load relevant tables
+rss.mu <- st_read(.rss_path, layer = 'mapunit')
+rss.co <- st_read(.rss_path, layer = 'component')
+rss.hz <- st_read(.rss_path, layer = 'chorizon')
+
+# Extract RAT from RSS
+rat <- cats(rss)[[1]]
+
+# Check for missing mukeys
+setdiff(rat$mukey, rss.mu$mukey)
+setdiff(rss.mu$mukey, rat$mukey)
+
+# Subset RSS tables
+rss.mu <- rss.mu[rss.mu$mukey %in% rat$mukey, ]
+rss.co <- rss.co[rss.co$mukey %in% rss.mu$mukey, ]
+rss.hz <- rss.hz[rss.hz$cokey %in% rss.co$cokey, ]
+
+# Save raw tabular data
+save(rss.mu, rss.co, rss.hz, file = here('data/rss-tab-data-raw.rda'))
+```
+
+### Load FY23 SSURGO Tabular Data
+```{r}
+# Extract mukeys from rasterized SSURGO data
+rat <- cats(s.rast)[[1]]
+.mukeys <- as.numeric(rat$mukey)
+
+# Query SSURGO tabular data via SDA
+ssurgo.mu <- SDA_query(sprintf("SELECT * FROM mapunit WHERE mukey IN %s", format_SQL_in_statement(.mukeys)))
+ssurgo.co <- SDA_query(sprintf("SELECT * FROM component WHERE mukey IN %s", format_SQL_in_statement(.mukeys)))
+
+# Get component keys and query horizons
+.cokeys <- unique(ssurgo.co$cokey)
+ssurgo.hz <- SDA_query(sprintf("SELECT * FROM chorizon WHERE cokey IN %s", format_SQL_in_statement(.cokeys)))
+
+# Save SSURGO tabular data
+save(ssurgo.mu, ssurgo.co, ssurgo.hz, file = here('data/ssurgo-tab-data-raw.rda'))
+```
+
+### Combine and Analyze RSS and SSURGO Data
+```{r}
+# Upgrade tabular data to SoilProfileCollection
+depths(rss.hz) <- cokey ~ hzdept_r + hzdepb_r
+site(rss.hz) <- rss.co
+site(rss.hz) <- rss.mu
+
+depths(ssurgo.hz) <- cokey ~ hzdept_r + hzdepb_r
+site(ssurgo.hz) <- ssurgo.co
+site(ssurgo.hz) <- ssurgo.mu
+
+# Plot RSS and SSURGO soil profile collections
+plotSPC(rss.hz[1:10, ])
+plotSPC(ssurgo.hz[1:10, ])
+
+# Combine RSS and SSURGO data
+site(rss.hz)$source <- 'RSS'
+site(ssurgo.hz)$source <- 'SSURGO'
+spc <- c(rss.hz, ssurgo.hz)
+
+# Set horizon name
+hzdesgnname(spc) <- 'hzname'
+
+# Check the number of profiles
+length(spc)
+
+# Compute depth class
+sdc <- getSoilDepthClass(spc)
+site(spc) <- sdc
+
+# Summarize data
+table(spc$depth.class)
+table(spc$source, spc$depth.class)
+
+# Save combined tabular data as SPC
+saveRDS(spc, file = here('data/combined-tab-data-SPC.rds'))
+```
+

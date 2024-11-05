@@ -1,0 +1,122 @@
+---
+title: "Soil Data Aggregation and Analysis"
+author: "Dylan Beaudette"
+output: html_notebook
+---
+
+# Note: code reformatted by Jonathan Maynard
+
+```{r setup, include=FALSE}
+# Load necessary libraries
+library(aqp)
+library(lattice)
+library(tactile)
+library(reshape2)
+library(here)
+# Load local functions
+source(here('code/local-functions.R'))
+```
+
+## TODO: Think about the implications of aggregation 
+- Depth class -> texture class.
+- Does it make sense to do these separately?
+
+### Load Data
+```{r}
+# Load data from '01-prepare-soil-data.R'
+# Combined map unit/component data as SPC (SoilProfileCollection)
+x <- readRDS(here('data/combined-tab-data-SPC.rds'))
+
+# Investigate mukind by source
+xtabs(~ source + mukind, data = unique(site(x)[, c('mukey', 'source', 'mukind')]))
+```
+
+### Original Proportions of Depth Class by Source
+```{r}
+# Analyze depth class proportions by source
+xtabs(~ source + depth.class, data = site(x))
+
+# Visualize depth class distribution by source
+histogram(~ depth | source, data = site(x), par.settings = tactile.theme())
+```
+
+### Simplify Depth Classes
+```{r}
+# Classify shallow (<50cm) vs everything else
+x$depth.class <- factor(x$depth.class, ordered = TRUE)
+x$simple.depth.class <- ifelse(x$depth.class <= 'shallow', 'shallow', 'deep')
+
+# Check proportions of simplified depth classes
+prop.table(xtabs(~ source + simple.depth.class, data = site(x)), margin = 1)
+
+# Develop dominant condition: simplified soil depth class
+s <- site(x)
+z <- split(s, s$mukey)
+z <- lapply(z, dominantCondition, v = 'simple.depth.class')
+
+# Create LUT (Lookup Table) by mukey/cokey
+depth.lut <- do.call('rbind', z)
+```
+
+### Analyze Soil Texture Class by Depth Condition
+```{r}
+# Filter SPC based on cokey in depth LUT
+x.sub <- subset(x, cokey %in% unique(depth.lut$cokey))
+
+# Classify soil texture (<2mm)
+x.sub$texture <- ssc_to_texcl(sand = x.sub$sandtotal_r, clay = x.sub$claytotal_r)
+
+# Visualize soil profiles with texture classification
+par(mar = c(0, 0, 3, 1))
+plotSPC(x.sub[1:30, ], color = 'texture')
+plotSPC(x.sub, color = 'texture', name = '', print.id = FALSE, width = 0.35)
+```
+
+## TODO: Is this a reasonable approach?
+- Consider 0-50cm depth.
+- Derive depth-weighted mean soil texture (sand and clay content).
+
+### Compute Depth-Weighted Mean Soil Texture
+```{r}
+# Compute weighted mean sand and clay content to depth (0-200cm)
+a <- slab(x.sub, cokey ~ sandtotal_r + claytotal_r, slab.structure = c(0, 200), slab.fun = mean, na.rm = TRUE)
+
+# Reshape and classify soil texture
+w <- dcast(a, cokey ~ variable, value.var = 'value')
+w$texture <- ssc_to_texcl(sand = w$sandtotal_r, clay = w$claytotal_r)
+```
+
+### Check Degree of Aggregation
+```{r}
+# Merge original and aggregated texture data
+g <- merge(horizons(x.sub)[, c('cokey', 'texture')], w[, c('cokey', 'texture')], by = 'cokey', all.x = TRUE, sort = FALSE)
+names(g) <- c('cokey', 'original.texture', 'agg.texture')
+g$agg.texture <- factor(g$agg.texture, levels = levels(g$original.texture))
+
+# Cross-tabulate original vs aggregated texture
+g.tab <- table(original = g$original.texture, aggregated = g$agg.texture)
+round(prop.table(g.tab, margin = 1) * 100)
+```
+
+## TODO: Report on the Loss of Detail
+- Examine the loss of detail, particularly abrupt textural changes.
+```{r}
+# Visualize original texture and aggregated texture
+plotSPC(x.sub[1:5, ], color = 'texture')
+w[1:5, ]
+```
+
+### Create Final LUT and Define "Soil Type"
+```{r}
+# Merge depth LUT and texture data
+final.lut <- merge(depth.lut, w, by = 'cokey', all.x = TRUE, sort = FALSE)
+
+# Define soil type as interaction between depth class and texture
+final.lut$soil.type <- interaction(final.lut$simple.depth.class, final.lut$texture)
+
+# Check final soil type table by source
+table(final.lut$source, final.lut$soil.type)
+
+# Save final LUT
+saveRDS(final.lut, file = here('data/soil-depth-texture-classe-lut.rds'))
+```

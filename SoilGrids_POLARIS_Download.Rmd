@@ -1,0 +1,373 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+```{r}
+library(rgdal)
+library(gdalUtils)
+library(sf)
+library(terra)
+
+
+download_soilgrids_data <- function(
+  voi,          # Variable of interest (e.g., "soc")
+  depth,        # Depth slice (e.g., "0-5cm")
+  quantile,     # Quantile (e.g., "Q0.5", "mean")
+  lrc_long,     # Longitude of the lower-right corner
+  lrc_lat,      # Latitude of the lower-right corner
+  size,         # Tile size in degrees
+  dest.dir      # Destination directory for the output files
+) {
+  # Load necessary libraries
+  options("rgdal_show_exportToProj4_warnings" = "none")
+  library(rgdal)
+  library(gdalUtils)
+  library(sf)
+  library(terra)
+  
+  # Define Coordinate Reference System (CRS)
+  crs.igh <- '+proj=igh +lat_0=0 +lon_0=0 +datum=WGS84 +units=m +no_defs'
+  
+  # Valid options for variables, depths, and quantiles
+  quantile.list <- c("Q0.05", "Q0.5", "Q0.95", "mean")
+  voi.list.sg <- c("clay", "silt", "sand", "phh2o", "cec", "soc",
+                   "bdod", "cfvo", "nitrogen", "ocd")
+  depth.list <- paste0(c("0-5", "5-15", "15-30", "30-60",
+                         "60-100", "100-200"), "cm")
+  
+  # Input validation
+  if (!(voi %in% voi.list.sg)) {
+    stop(paste("Invalid variable of interest. Choose from:",
+               paste(voi.list.sg, collapse = ", ")))
+  }
+  if (!(depth %in% depth.list)) {
+    stop(paste("Invalid depth. Choose from:",
+               paste(depth.list, collapse = ", ")))
+  }
+  if (!(quantile %in% quantile.list)) {
+    stop(paste("Invalid quantile. Choose from:",
+               paste(quantile.list, collapse = ", ")))
+  }
+  
+  # Construct the layer name
+  voi_layer <- paste(voi, depth, quantile, sep = "_")
+  
+  # Define the Area of Interest (AOI)
+  tile.lrc <- c(lrc_long, lrc_lat)              # Lower-right corner
+  tile.ulc <- c(tile.lrc[1] - size, tile.lrc[2] + size)  # Upper-left corner
+  coords <- matrix(c(
+    tile.ulc[1], tile.ulc[2],  # Upper-left corner
+    tile.lrc[1], tile.ulc[2],  # Upper-right corner
+    tile.lrc[1], tile.lrc[2],  # Lower-right corner
+    tile.ulc[1], tile.lrc[2],  # Lower-left corner
+    tile.ulc[1], tile.ulc[2]   # Close the polygon
+  ), ncol = 2, byrow = TRUE)
+  
+  bb.ll <- st_polygon(list(coords))
+  bb.ll <- st_sfc(bb.ll, crs = 4326)
+  
+  # Transform bounding box to the target CRS
+  bb.igh <- st_transform(bb.ll, crs = crs.igh)
+  bb.igh.coords <- st_coordinates(bb.igh)[, 1:2]
+  bb.sg <- c(
+    min(bb.igh.coords[, "X"]),
+    max(bb.igh.coords[, "Y"]),
+    max(bb.igh.coords[, "X"]),
+    min(bb.igh.coords[, "Y"])
+  )
+  
+  # Create a directory prefix based on AOI
+  AOI.dir.prefix <- paste0(
+    "lat", tile.lrc[2], "_", tile.ulc[2],
+    "_lon", tile.ulc[1], "_", tile.lrc[1]
+  )
+  
+  # Set up destination directories
+  dest.dir.sg <- file.path(
+    dest.dir,
+    AOI.dir.prefix,
+    voi,
+    quantile,
+    depth
+  )
+  if (!dir.exists(dest.dir.sg)) {
+    dir.create(dest.dir.sg, recursive = TRUE)
+  }
+  
+  # SoilGrids data URL
+  sg_url <- "/vsicurl/https://files.isric.org/soilgrids/latest/data/"
+  
+  # Define output file paths
+  file.out.vrt <- file.path(dest.dir.sg, paste0(voi_layer, ".vrt"))
+  file.out.tif <- file.path(dest.dir.sg, paste0(voi_layer, ".tif"))
+  
+  # Download the VRT file
+  gdal_translate(
+    src_dataset = paste0(sg_url, voi, "/", voi_layer, ".vrt"),
+    dst_dataset = file.out.vrt,
+    tr = c(250, 250),
+    projwin = bb.sg,
+    projwin_srs = crs.igh,
+    of = "VRT",
+    overwrite = TRUE,
+    verbose = TRUE
+  )
+  
+  # Convert the VRT to a GeoTIFF file
+  gdal_translate(
+    src_dataset = file.out.vrt,
+    dst_dataset = file.out.tif,
+    co = c("TILED=YES", "COMPRESS=DEFLATE", "PREDICTOR=2", "BIGTIFF=YES"),
+    projwin = bb.sg,
+    overwrite = TRUE,
+    of = "GTiff"
+  )
+  
+  message("Download completed: ", file.out.tif)
+}
+
+
+download_polaris_data <- function(
+  voi,          # Variable of interest (e.g., "clay")
+  depth,        # Depth slice (e.g., "0_5")
+  quantile,     # Quantile (e.g., "p5", "mean")
+  lrc_long,     # Longitude of the lower-right corner
+  lrc_lat,      # Latitude of the lower-right corner
+  dest.dir      # Destination directory for the output files
+) {
+  # Load necessary libraries
+  if (!requireNamespace("terra", quietly = TRUE)) {
+    install.packages("terra")
+  }
+  library(terra)
+  
+  # Valid options for variables, depths, and quantiles
+  quantile.list.polaris <- c("p5", "p50", "p95", "mean")
+  voi.list.polaris <- c("clay", "silt", "sand", "ph", "om", "bd")
+  depth.list.polaris <- c("0_5", "5_15", "15_30", "30_60", "60_100", "100_200")
+  
+  # Input validation
+  if (!(voi %in% voi.list.polaris)) {
+    stop(paste("Invalid variable of interest. Choose from:",
+               paste(voi.list.polaris, collapse = ", ")))
+  }
+  if (!(depth %in% depth.list.polaris)) {
+    stop(paste("Invalid depth. Choose from:",
+               paste(depth.list.polaris, collapse = ", ")))
+  }
+  if (!(quantile %in% quantile.list.polaris)) {
+    stop(paste("Invalid quantile. Choose from:",
+               paste(quantile.list.polaris, collapse = ", ")))
+  }
+  
+  # Construct the layer name
+  voi_layer <- paste(voi, depth, quantile, sep = "_")
+  
+  # Define the Area of Interest (AOI)
+  tile.lrc <- c(lrc_long, lrc_lat)              # Lower-right corner
+  tile.ulc <- c(tile.lrc[1] - 1, tile.lrc[2] + 1)  # Upper-left corner (since tiles are 1° x 1°)
+  
+  # Create a directory prefix based on AOI
+  AOI.dir.prefix <- paste0(
+    "lat", tile.lrc[2], tile.ulc[2],
+    "_lon", tile.ulc[1], tile.lrc[1]
+  )
+  
+  # Set up destination directories
+  dest.dir.polaris <- file.path(
+    dest.dir,
+    AOI.dir.prefix,
+    voi,
+    quantile,
+    depth
+  )
+  if (!dir.exists(dest.dir.polaris)) {
+    dir.create(dest.dir.polaris, recursive = TRUE)
+  }
+  
+  # Build the tile file name
+  polaris.tile <- paste0(
+    "lat", tile.lrc[2], tile.ulc[2],
+    "_lon", tile.ulc[1], tile.lrc[1],
+    ".tif"
+  )
+  
+  # Build the URL for downloading
+  url <- paste0(
+    "http://hydrology.cee.duke.edu/POLARIS/PROPERTIES/v1.0/",
+    voi, "/", quantile, "/", depth, "/",
+    polaris.tile
+  )
+  
+  # Destination file path
+  dest.file <- file.path(dest.dir.polaris, polaris.tile)
+  
+  # Download the file if it doesn't already exist
+  if (!file.exists(dest.file)) {
+    message("Downloading POLARIS data from: ", url)
+    download.file(
+      url = url,
+      destfile = dest.file,
+      method = "auto",
+      mode = "wb"
+    )
+    message("Download completed: ", dest.file)
+  } else {
+    message("Local copy of file already exists at: ", dest.file)
+  }
+}
+
+
+```
+
+
+```{r}
+# SoilGrids setup
+# Define parameters for Coweeta Hydrologic Laboratory
+voi <- "clay"          # Variable of interest (e.g., "soc" for soil organic carbon)
+depth <- "0-5cm"      # Depth slice (e.g., "0-5cm")
+quantile <- "mean"    # Quantile (e.g., "mean")
+lrc_long <- -83   # Longitude of the lower-right corner
+lrc_lat <- 35     # Latitude of the lower-right corner
+size <- 0.5          # Tile size in degrees
+dest.dir <- here::here("data/")  # Replace with your actual directory
+
+# Call the function to download data
+download_soilgrids_data(
+  voi = voi,
+  depth = depth,
+  quantile = quantile,
+  lrc_long = lrc_long,
+  lrc_lat = lrc_lat,
+  size = size,
+  dest.dir = dest.dir
+)
+
+sg_clay <- rast(here::here("data/lat35_35.5_lon-83.5_-83/clay/mean/0-5cm/clay_0-5cm_mean.tif"))
+
+# POLARIS setup
+# Define parameters
+voi <- "clay"
+depth <- "0_5"
+quantile <- "mean"
+lrc_long <- -83   # Longitude of the lower-right corner
+lrc_lat <- 35     # Latitude of the lower-right corner
+dest.dir <- here::here("data/")  # Replace with your actual directory
+
+# Call the function
+download_polaris_data(
+  voi = voi,
+  depth = depth,
+  quantile = quantile,
+  lrc_long = lrc_long,
+  lrc_lat = lrc_lat,
+  dest.dir = dest.dir
+)
+polaris_clay <- rast(here::here("data/lat3536_lon-84-83/clay/mean/0_5/lat3536_lon-84-83.tif"))
+
+
+plot(polaris_clay)
+plot(sg_clay)
+
+
+
+r <- rast(here('data/grids/rss_utm.tif'))
+o <- vect('data/vect/Coweeta_Hydrologic_Laboratory.shp')
+
+polaris_clay_proj <- terra::project(polaris_clay, crs(r))
+sg_clay_proj <- terra::project(sg_clay, crs(r))
+
+sg_clay_proj_crop <- crop(sg_clay_proj, ext(r))
+sg_clay_proj <- mask(sg_clay_proj_crop,  o)
+
+polaris_clay_proj_crop <- crop(polaris_clay_proj, ext(r))
+polaris_clay_proj <- mask(polaris_clay_proj_crop,  o)
+
+plot(polaris_clay_proj)
+plot(sg_clay_proj/10)
+plot(ss['claytotal_r'])
+plot(rr['claytotal_r'])
+```
+```{r}
+# Load necessary libraries
+library(terra)
+library(ggplot2)
+library(viridis)
+library(cowplot)
+
+# Convert rasters to data frames with explicit renaming
+polaris_df <- as.data.frame(polaris_clay_proj, xy = TRUE)
+colnames(polaris_df)[3] <- "clay_percent"
+
+sg_df <- as.data.frame(sg_clay_proj, xy = TRUE)
+colnames(sg_df)[3] <- "clay_percent"
+
+ss_df <- as.data.frame(ss['claytotal_r'], xy = TRUE)
+colnames(ss_df)[3] <- "clay_percent"
+
+rr_df <- as.data.frame(rr['claytotal_r'], xy = TRUE)
+colnames(rr_df)[3] <- "clay_percent"
+
+# Set the common color scale range
+clay_min <- 9
+clay_max <- 25
+color_palette <- viridis::viridis(100, option = "C")
+
+# Create individual ggplot maps with updated legend title
+plot_polaris <- ggplot(polaris_df) +
+  geom_raster(aes(x = x, y = y, fill = clay_percent)) +
+  scale_fill_gradientn(name = "Clay %", colors = color_palette, limits = c(clay_min, clay_max)) +
+  labs(title = "Polaris Clay") +
+  theme_minimal() +
+  theme(legend.position = "right")
+
+plot_sg <- ggplot(sg_df) +
+  geom_raster(aes(x = x, y = y, fill = clay_percent)) +
+  scale_fill_gradientn(name = "Clay %", colors = color_palette, limits = c(clay_min, clay_max)) +
+  labs(title = "SoilGrids Clay") +
+  theme_minimal() +
+  theme(legend.position = "right")
+
+plot_ss <- ggplot(ss_df) +
+  geom_raster(aes(x = x, y = y, fill = clay_percent)) +
+  scale_fill_gradientn(name = "Clay %", colors = color_palette, limits = c(clay_min, clay_max)) +
+  labs(title = "SSURGO Clay") +
+  theme_minimal() +
+  theme(legend.position = "right")
+
+plot_rr <- ggplot(rr_df) +
+  geom_raster(aes(x = x, y = y, fill = clay_percent)) +
+  scale_fill_gradientn(name = "Clay %", colors = color_palette, limits = c(clay_min, clay_max)) +
+  labs(title = "RSS Clay") +
+  theme_minimal() +
+  theme(legend.position = "right")
+
+# Extract a shared legend with the new label from one of the plots
+shared_legend <- cowplot::get_legend(plot_polaris)
+
+# Remove legends from individual plots
+plot_polaris <- plot_polaris + theme(legend.position = "none")
+plot_sg <- plot_sg + theme(legend.position = "none")
+plot_ss <- plot_ss + theme(legend.position = "none")
+plot_rr <- plot_rr + theme(legend.position = "none")
+
+# Arrange the plots in a 2x2 grid and add the shared legend to the right
+combined_plot <- cowplot::plot_grid(
+  plot_polaris, plot_sg,
+  plot_ss, plot_rr,
+  ncol = 2, align = "hv", labels = "AUTO"
+)
+
+# Add the legend to the right of the grid
+final_plot <- cowplot::plot_grid(combined_plot, shared_legend, ncol = 2, rel_widths = c(0.9, 0.1))
+
+# Display the final plot
+print(final_plot)
+
+ggsave("clay_maps_grid_with_legend.png", final_plot, width = 12, height = 8, dpi = 300)
+
+```
+
+
+

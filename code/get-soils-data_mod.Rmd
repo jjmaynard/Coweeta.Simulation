@@ -1,0 +1,418 @@
+---
+title: "Coweeta Raster Soil Survey"
+author: "D.E. Beaudette (modified by Jonathan Maynard)"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    mathjax: null
+    jquery: null
+    smart: no
+    number_sections: yes
+    toc: yes
+    toc_depth: 3
+    toc_float:
+      collapsed: true
+      smooth_scroll: false
+---
+
+```{r setup, echo=FALSE, results='hide', warning=FALSE}
+library(knitr, quietly=TRUE)
+
+opts_chunk$set(
+  message = FALSE, 
+  warning = FALSE, 
+  background = '#F7F7F7', 
+  fig.align = 'center', 
+  dev = 'png', 
+  fig.retina = 2,
+  tidy = FALSE, 
+  verbose = FALSE
+)
+
+options(width=100, stringsAsFactors=FALSE)
+```
+
+```{r}
+# latest from GitHub
+library(soilDB)
+library(sharpshootR)
+library(dendextend)
+library(SoilTaxonomy)
+
+# wrangling polygons and CRS transformations
+library(sp)
+# library(rgdal)
+
+# geometric calculations
+library(rgeos)
+
+# this is the future, will eventually replace much of 
+# sp, rgdal, rgeos methods used here
+library(sf)
+
+# raster data visualization
+library(raster)
+library(rasterVis)
+library(viridis)
+
+# soil classification
+library(aqp)
+library(here)
+
+## objectives:
+# * get current soils data via SDA / 30m gSSURGO mukey grid
+# * select a representative soil "type" (component) per MU
+# * re-sample to the DEM grid
+# * develop soil hydraulic parameter files for each soil type
+
+
+## get an expanded AOI defined by basins
+x <- read_sf(here('data/vect/coweeta_boundary_buff.shp'))
+
+# basins
+b <- read_sf(here('data/vect/Coweeta_Hydrologic_Laboratory.shp'))
+
+# points
+p <- read_sf(here('data/vect/Soil_Moisture_Sites_CW.shp'))
+
+## request the 30m mukey grid for this AOI
+mu <- mukey.wcs(aoi = b, db = 'gssurgo')
+
+# transform to AEA CRS used by gSSURGO grid
+x <- st_transform(x, st_crs(mu))
+b <- st_transform(b, st_crs(mu))
+p <- st_transform(p, st_crs(mu))
+```
+
+```{r fig.width=8, fig.height=10}
+# check: ok
+levelplot(
+  mu, att = 'ID', 
+  main = 'Coweeta\ngSSURGO Grid (WCS) + Expanded AOI',
+  margin = FALSE, 
+  colorkey = FALSE,
+  col.regions = viridis,
+  scales = list(draw = FALSE),
+  panel = function(...) {
+    panel.levelplot(...)
+    sp.lines(as(b, 'Spatial'), col = 'white', lwd = 2)
+    sp.points(as(p, 'Spatial'), col = 'white', pch = 16)
+  }
+)
+```
+
+
+```{r fig.width=8, fig.height=10}
+## TODO: apply a reasonable MASK... what defines that?
+
+
+## develop a "soil type" grid: component selection
+
+# get unique mukeys from grid
+keys <- levels(mu)[[1]]$ID
+
+# get component data for these map units
+# components must not be 'Miscellaneous area' and have hz data
+
+is <- format_SQL_in_statement(keys)
+qq <- sprintf("
+              SELECT DISTINCT mukey, component.cokey, compname, comppct_r, compkind, drainagecl, taxpartsize
+              FROM
+              component
+              JOIN chorizon on component.cokey = chorizon.cokey 
+              WHERE mukey IN %s 
+              AND comppct_r IS NOT NULL 
+              AND compkind != 'Miscellaneous area' 
+              ORDER BY component.mukey, cokey, comppct_r DESC;
+              ", is)
+
+mu.data <- SDA_query(qq)
+
+# check: are there any map unit keys without soils data?
+(missing.keys <- setdiff(keys, unique(mu.data$mukey)))
+
+## TODO: double-check to see if this even matters
+SDA_query(sprintf("SELECT mukey, cokey, compname, comppct_r FROM component WHERE mukey IN %s;", format_SQL_in_statement(missing.keys)))
+
+
+# iterate over components, select the largest non-misc. area
+m <- split(mu.data, mu.data$mukey)
+
+s <- lapply(m, function(i) {
+  # Misc. areas have been removed
+  i <- i[order(i$comppct_r, decreasing = TRUE)[1], ]
+  
+})
+
+s <- do.call('rbind', s)
+row.names(s) <- NULL
+
+mu <- raster(mu)
+
+## dominant component data to MU grid via RAT
+ll <- levels(mu)[[1]]
+
+# merge RAT + soil type data
+# missing data in the soil type DF will result in NA
+rat <- merge(ll, s[, c('mukey', 'compname', 'cokey', 'comppct_r', 'drainagecl', 'taxpartsize')], by.x = 'ID', by.y = 'mukey', sort = FALSE, all.x = TRUE)
+
+# fill missing records with a NODATA + codes for finding these later if it matters
+missing.idx <- which(is.na(rat$cokey))
+if(length(missing.idx) > 0) {
+  rat$compname[missing.idx] <- 'NODATA'
+  rat$cokey[missing.idx] <- '0'
+}
+
+# re-pack RAT
+levels(mu) <- rat
+
+# compute rough estimates of acreage
+
+
+
+# convert to unique codes associated with soil type (soil series for now)
+soiltype <- deratify(mu, att = 'compname')
+drainagecl <- deratify(mu, att = 'drainagecl')
+taxpartsize <- deratify(mu, att = 'taxpartsize')
+```
+
+```{r fig.width=10, fig.height=8}
+## pixel-based estimates of area (largest, non-misc. area)
+a <- data.frame(
+  levels(soiltype)[[1]],
+  freq(soiltype)
+)
+
+
+a <- merge(a, mu.data, by = 'compname', all.x = TRUE)
+
+a$coweeta_ac <- a$count * (a$comppct_r / 100) * (mean(res(soiltype))^2) * 0.000247105
+
+a$id <- toupper(a$compname)
+
+a <- aggregate(coweeta_ac ~ id, data = a, FUN = sum)
+a$coweeta_ac <- round(a$coweeta_ac)
+
+
+a <- a[order(a$coweeta_ac, decreasing = TRUE), ]
+
+
+osds <- fetchOSD(a$id)
+
+osds$hzd <- hzDistinctnessCodeToOffset(osds$distinctness)
+
+
+site(osds) <- a[, c('id', 'coweeta_ac')]
+```
+
+```{r fig.width=16, fig.height=7}
+SoilTaxonomyDendrogram(osds, width = 0.35, name.style = 'center-center', y.offset = 0.4, hz.distinctness.offset = 'hzd', shrink = TRUE)
+```
+
+```{r fig.width=15, fig.height=6}
+par(mar = c(0, 0, 0, 3))
+plotSPC(osds, width = 0.35, name.style = 'center-center',  hz.distinctness.offset = 'hzd', shrink = TRUE, plot.order = order(osds$coweeta_ac, decreasing = TRUE), cex.depth.axis = 0.8, cex.names = 0.7)
+
+axis(side = 1, at = 1:length(osds), labels = osds$coweeta_ac[order(osds$coweeta_ac, decreasing = TRUE)], line = -5, cex.axis = 0.75)
+
+mtext('Approximate Acres within Coweeta', side = 1, line = -2.5, at = 0.5, adj = 0)
+```
+
+
+```{r fig.width=10, fig.height=8}
+# check: ok
+levelplot(
+  soiltype, att = 'compname', 
+  main = 'Coweeta\ngSSURGO Grid (WCS) + Expanded AOI',
+  margin = FALSE, 
+  colorkey = list(space = 'right'),
+  col.regions = viridis,
+  scales = list(draw = FALSE),
+  panel = function(...) {
+    panel.levelplot(...)
+    sp.lines(as(b, 'Spatial'), col = 'white', lwd = 2)
+    # sp.lines(as(x, 'Spatial'), col = 'white', lwd = 1, lty = 3)
+  }
+)
+
+# check: ok
+levelplot(
+  drainagecl, att = 'drainagecl', 
+  main = 'Coweeta\ngSSURGO Grid (WCS) + Expanded AOI',
+  margin = FALSE, 
+  scales = list(draw = FALSE),
+  colorkey = list(space = 'right'),
+  col.regions = viridis,
+  panel = function(...) {
+    panel.levelplot(...)
+    sp.lines(as(b, 'Spatial'), col = 'white', lwd = 2)
+    # sp.lines(as(x, 'Spatial'), col = 'white', lwd = 1, lty = 3)
+  }
+)
+
+# check: ok
+levelplot(
+  taxpartsize, att = 'taxpartsize', 
+  main = 'Coweeta\ngSSURGO Grid (WCS) + Expanded AOI',
+  margin = FALSE, 
+  colorkey = list(space = 'right'),
+  col.regions = rev(RColorBrewer::brewer.pal(n = 8, name = 'Spectral')),
+  scales = list(draw = FALSE),
+  panel = function(...) {
+    panel.levelplot(...)
+    sp.lines(as(b, 'Spatial'), col = 'black', lwd = 2)
+    # sp.lines(as(x, 'Spatial'), col = 'white', lwd = 1, lty = 3)
+  }
+)
+```
+
+
+
+```{r fig.width=10, fig.height=8}
+## save
+writeRaster(soiltype, file = here('data/grids/soiltype-soil-series.tif'), options = 'COMPRESS=LZW', overwrite = TRUE, datatype = 'INT1U')
+```
+
+
+```{r fig.width=10, fig.height=8}
+## develop representative soil type data
+## TODO: using components or KSSL, or both?
+
+
+
+
+## develop a soil texture "soil type" map 0-50cm
+
+# get thematic data from SDA
+# dominant component
+# depth-weighted average
+# sand, silt, clay, AWC (RV)
+p <-  get_SDA_property(property = c("sandtotal_r","silttotal_r","claytotal_r", "awc_r"),
+                       method = "Dominant Component (Numeric)", 
+                       mukeys = ll$ID,
+                       top_depth = 0,
+                       bottom_depth = 100)
+
+# check
+head(p)
+
+# re-create raster attribute table with aggregate soil properties
+rat <- merge(ll, p, by.x = 'ID', by.y = 'mukey', sort = FALSE, all.x = TRUE)
+
+# re-pack RAT
+levels(mu) <- rat
+
+# convert raster + RAT --> stack of values
+s <- deratify(mu, att = c("sandtotal_r", "silttotal_r", "claytotal_r", "awc_r"))
+
+# graphical check
+levelplot(
+  s[[1:3]], 
+  main = 'Sand, Silt, Clay (RV) 0-100cm\nDominant Component (Numeric)',
+  margin = FALSE, 
+  scales = list(draw = FALSE), 
+  col.regions = viridis
+)
+
+levelplot(
+  s[[4]], 
+  main = 'AWC (RV) 0-100cm\nDominant Component (Numeric)',
+  margin = FALSE, 
+  scales = list(draw = FALSE), 
+  col.regions = viridis
+)
+
+
+
+# convert to a representative soil texture class
+txt.lut <- read.csv('http://soilmap2-1.lawr.ucdavis.edu/800m_grids/RAT/texture_2550.csv')
+
+# make a copy
+texture_0100 <- s[[1]]
+
+# note: soil textures that aren't present are dropped from factor levels
+texture_0100[] <- ssc_to_texcl(sand = s$sandtotal_r[], clay = s$claytotal_r[])
+
+# extract RAT
+rat <- levels(texture_0100)[[1]]
+
+# add colors
+rat <- merge(rat, txt.lut, by.x = 'VALUE', by.y = 'class', all.x = TRUE, sort = FALSE)
+
+# fix column order
+rat <- rat[, c('ID', 'VALUE', 'hex', 'names')]
+
+# re-pack
+levels(texture_0100) <- rat
+
+# check: ok
+cols <- levels(texture_0100)[[1]]$hex
+levelplot(
+  texture_0100, 
+  att = 'names', col.regions = cols,
+  main = 'Soil Texture (fine earth fraction) 0-100cm\nDominant Component (Numeric)',
+  margin = FALSE, 
+  scales = list(draw = FALSE),
+  panel = function(...) {
+    panel.levelplot(...)
+    sp.lines(as(b, 'Spatial'), col = 'black', lwd = 2)
+    # sp.lines(as(x, 'Spatial'), col = 'white', lwd = 1, lty = 3)
+  }
+)
+```
+
+
+
+```{r fig.width=10, fig.height=8}
+## save
+writeRaster(texture_0100, file = here('data/grids/soiltype-texture_0100.tif'), options = 'COMPRESS=LZW', overwrite = TRUE, datatype = 'INT1U')
+```
+
+
+
+
+```{r fig.width=10, fig.height=8}
+## be sure to specify a depth range
+
+# get unique mukeys from grid
+keys <- levels(mu)[[1]]$ID
+
+s <- get_SDA_property(property = 'Available Water Capacity - Rep Value', method = 'Weighted Average', mukeys = keys, top_depth = 0, bottom_depth = 100)
+
+
+
+# get unique mukeys from grid
+ll <- levels(mu)[[1]]
+
+# convert into an SQL "IN" statement
+IS <- format_SQL_in_statement(ll$ID)
+
+# query SDA by mukey
+sql <- sprintf("SELECT mukey, aws025wta, aws050wta, aws0100wta, aws0150wta FROM muaggatt WHERE mukey IN %s", IS)
+tab <- SDA_query(sql)
+
+# merge AWS by mukey into raster attribute table (RAT)
+rat <- merge(ll, tab, by.x = 'ID', by.y = 'mukey', sort = FALSE, all.x = TRUE)
+
+# re-pack RAT
+levels(mu) <- rat
+
+(aws <- deratify(mu, att = 'aws0100wta'))
+
+levelplot(
+  aws, 
+  main = 'Available Water Storage 0-100cm (cm)\ngSSURGO WCS + SDA',
+  margin = FALSE, 
+  scales = list(draw = FALSE), 
+  col.regions = viridis,
+  panel = function(...) {
+    panel.levelplot(...)
+    sp.lines(as(b, 'Spatial'), col = 'white', lwd = 2)
+  }
+)
+```
+
+```{r fig.width=8, fig.height=6}
+hist(aws, breaks = 20, las = 1, main = 'Available Water Storage 0-100cm (cm)\ngSSURGO WCS + SDA', cex.axis = 0.66)
+```
+

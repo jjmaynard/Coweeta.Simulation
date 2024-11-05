@@ -1,0 +1,129 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+
+```{r}
+# load libraries
+library(aqp)
+library(soilDB)
+library(lattice)
+library(tactile)
+library(maps)
+
+# fetch KSSL data by series name
+sn <- c('wayah', 'burton', 'craggey', 'tanasee')
+g <- fetchKSSL(series = sn, progress = FALSE)
+
+# compute weighted-mean particle diameter for later
+g$wmpd <- with(horizons(g), ((vcs * 1.5) + (cs * 0.75) + (ms * 0.375) + (fs * 0.175) + (vfs *0.075) + (silt * 0.026) + (clay * 0.0015)) / (vcs + cs + ms + fs + vfs + silt + clay))
+
+# estimate soil depth based on horizon designations
+sdc <- getSoilDepthClass(g, name = 'hzn_desgn')
+
+# splice-into site data
+site(g) <- sdc
+
+# viz with box-whisker plot
+# note variation in letter case
+bwplot(taxonname ~ depth, data = as.data.frame(g), par.settings = tactile.theme(), xlab = 'Soil Depth (cm)')
+```
+
+```{r}
+# check
+table(g$taxonname)
+```
+```{r}
+Burton <- subset(g, taxonname == 'Burton')
+Craggey <- subset(g, taxonname == 'Craggey')
+Tanasee <- subset(g, taxonname == 'Tanasee')
+Wayah <- subset(g, taxonname == 'Wayah')
+
+# generate a basemap of northern California, with county boundaries
+map('county', 'North Carolina', xlim=c(-83, -81), ylim=c(35.0, 36.5))
+# add long/lat axes
+map.axes()
+# add locations of musick
+points(y ~ x, data=site(Burton), pch=21, bg='RoyalBlue')
+# add locations of holland
+points(y ~ x, data=site(Craggey), pch=21, bg='DarkRed')
+# add locations of chaix
+points(y ~ x, data=site(Tanasee), pch=21, bg='DarkGreen')
+# add locations of chaix
+points(y ~ x, data=site(Wayah), pch=21, bg='Yellow')
+# add a simple legend
+legend('topright', pch=21, pt.bg=c('RoyalBlue', 'DarkRed', 'DarkGreen', 'Yellow'), legend=c('Burton', 'Craggey', 'Tanasee', 'Wayah'), xpd = NA, inset = -0.1, bg 
+ = 'white')
+
+```
+
+
+```{r}
+# convert taxonname to a factor for grouping
+g$taxonname <- factor(g$taxonname)
+
+# reset margins
+par(mar = c(0, 0, 3, 2))
+
+# set all subsequent sketch style via options
+options(.aqp.plotSPC.args = list(color = 'clay', print.id = FALSE, max.depth = 200, name.style = 'center-center', depth.axis = list(cex = 1, line = -4)))
+
+groupedProfilePlot(g, groups = 'taxonname', group.name.cex = 1)
+
+options(.aqp.plotSPC.args = NULL)
+```
+
+
+```{r}
+g.slab <- slab(g, taxonname ~ clay + estimated_ph_h2o + oc + cec7)
+
+# inspect stacked data structure
+str(g.slab)
+
+# re-name soils with series name + number of pedons-- order is critical !
+new.levels <- c('Wayah', 'Burton', 'Craggey', 'Tanasee')
+new.labels <- paste(new.levels, ' [', c(length(Wayah), length(Burton), length(Craggey), length(Tanasee)), ' pedons]', sep = '')
+g.slab$taxonname <- factor(g.slab$taxonname, levels = new.levels, labels = new.labels)
+
+# new names should match the order in:
+levels(g.slab$variable)
+g.slab_wayah <- g.slab[g.slab$taxonname=='Wayah [7 pedons]',]
+g.slab_burton <- g.slab[g.slab$taxonname=='Burton [7 pedons]',]
+
+```
+
+```{r}
+# define plotting style
+tps <- list(superpose.line = list(col = 'RoyalBlue', lwd = 2))
+# plot grouped, aggregate data
+xyplot(top ~ p.q50 | variable, groups=taxonname, data=g.slab_burton, ylab='Depth',
+       xlab='median bounded by 25th and 75th percentiles',
+       lower=g.slab_burton$p.q25, upper=g.slab_burton$p.q75, ylim=c(205,-5),
+       panel=panel.depth_function, alpha=0.25, sync.colors=TRUE,
+       prepanel=prepanel.depth_function,
+       cf=g.slab_burton$contributing_fraction,
+       par.strip.text=list(cex=0.8),
+       strip=strip.custom(bg=grey(0.85)),
+       layout=c(4,1), scales=list(x=list(alternating=1, relation='free'), y=list(alternating=3)),
+       par.settings=tps,
+       auto.key=list(columns=3, lines=TRUE, points=FALSE)
+)
+
+tps <- list(superpose.line = list(col = 'DarkRed', lwd = 2))
+xyplot(top ~ p.q50 | variable, groups=taxonname, data=g.slab_wayah, ylab='Depth',
+       xlab='median bounded by 25th and 75th percentiles',
+       lower=g.slab_wayah$p.q25, upper=g.slab_wayah$p.q75, 
+       ylim=c(205,-5),
+       panel=panel.depth_function, alpha=0.25, sync.colors=TRUE,
+       prepanel=prepanel.depth_function,
+       cf=g.slab_wayah$contributing_fraction,
+       par.strip.text=list(cex=0.8),
+       strip=strip.custom(bg=grey(0.85)),
+       layout=c(4,1), scales=list(x=list(alternating=1, relation='free'), y=list(alternating=3)),
+       par.settings=tps,
+       auto.key=list(columns=3, lines=TRUE, points=FALSE)
+)
+
+```
+

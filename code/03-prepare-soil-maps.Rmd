@@ -1,0 +1,121 @@
+---
+title: "Create Soil Maps"
+author: "D.E. Beaudette"
+output: html_notebook
+---
+
+# Note: code reformatted by Jonathan Maynard
+
+```{r setup, include=FALSE}
+# Load necessary libraries
+library(terra)
+library(aqp)
+library(viridisLite)
+library(here)
+```
+
+## Loading 10m Mukey Grids (UTM z17)
+```{r}
+# Load mukey grids
+r <- rast(here('data/grids/rss_utm.tif'))
+s <- rast(here('data/grids/ssurgo_utm.tif'))
+```
+
+## Load Combined LUT with Depth/Texture Classes
+```{r}
+# Load LUT with depth/texture classes and soil type class
+lut <- readRDS(here('data/soil-depth-texture-classe-lut.rds'))
+```
+
+### Check on Codes Used by Source
+```{r}
+# Check structure of soil type classes
+str(lut$soil.type)
+
+# List soil type levels
+levels(lut$soil.type)
+
+# Frequency tables by source and soil type
+table(source = lut$source, soil.type = lut$soil.type)
+
+# Frequency tables by source and component name
+table(source = lut$source, compname = lut$compname)
+```
+
+## Ensure Factor Levels and Order are Preserved
+```{r}
+# Convert soil type to numeric codes
+lut$soil.type.numeric <- as.numeric(lut$soil.type)
+```
+
+## Extract and Update Raster Attribute Tables (RAT)
+```{r}
+# Extract RAT from RSS and SSURGO grids
+r.rat <- cats(r)[[1]]
+s.rat <- cats(s)[[1]]
+
+# Merge with LUT
+r.rat <- merge(r.rat, lut, by = 'mukey', all.x = TRUE, sort = FALSE)
+s.rat <- merge(s.rat, lut, by = 'mukey', all.x = TRUE, sort = FALSE)
+
+# Convert 'mukey' to numeric
+r.rat$mukey <- as.numeric(r.rat$mukey)
+s.rat$mukey <- as.numeric(s.rat$mukey)
+
+# Re-pack updated RATs
+levels(r) <- r.rat
+levels(s) <- s.rat
+```
+
+## Convert RAT Columns to Raster Layers
+```{r}
+# Convert RAT columns to raster layers
+rr <- catalyze(r)
+ss <- catalyze(s)
+
+# Plot component names
+plot(rr['compname'])
+plot(ss['compname'])
+```
+
+## Combine and Plot Grids
+```{r}
+# Combine RSS and SSURGO grids based on soil type numeric codes
+z <- c(rr['soil.type.numeric'], ss['soil.type.numeric'])
+
+# Plot combined grids with rainbow colors
+plot(z, col=rainbow(5))
+```
+
+## Save Soil Type Class Rasters
+```{r}
+# Save RSS and SSURGO soil type class rasters
+writeRaster(rr['soil.type.numeric'], filename = here('data/grids/rss-soiltype-class.tif'), overwrite = TRUE)
+writeRaster(ss['soil.type.numeric'], filename = here('data/grids/ssurgo-soiltype-class.tif'), overwrite = TRUE)
+```
+
+## Plot Saved Grids for Verification
+```{r}
+col=rainbow(5)
+# Load and plot saved soil type rasters
+plot(rast(here('data/grids/rss-soiltype-class.tif')), col=col[-4])
+plot(rast(here('data/grids/ssurgo-soiltype-class.tif')), col=col)
+```
+
+## Optional: Testing Soil Type Integer to Factor Conversion (Not Working)
+```{r eval=FALSE}
+# Testing: convert soil type integers to factors (doesn't work)
+# z <- as.factor(z)
+# ll <- cats(z)
+# 
+# .st <- levels(lut$soil.type)
+# ll[[1]]$soiltype <- .st[ll[[1]]$label]
+# ll[[2]]$soiltype <- .st[ll[[2]]$label]
+# 
+# levels(z) <- ll
+# 
+# activeCat(z[[1]]) <- 'soiltype'
+# activeCat(z[[2]]) <- 'soiltype'
+# plot(z)
+```
+

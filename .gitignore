@@ -4,9 +4,12 @@
 .Ruserdata
 .Rapp.history
 .DS_Store
-analysis/figure
-analysis/*png
-analysis/*html
-analysis/*_cache
-analysis/site_libs
+report/figures
+report/*png
+report/*html
+report/*_cache
+report/site_libs
 proj_setup/
+data/
+/*png
+code/coweeta_dss
